@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
+
+:root {
+  --background: #0a0a0f;
+  --foreground: #e2e8f0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a2a3d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3d3d5c;
+}
+
+/* Sandpack overrides */
+.sp-wrapper,
+.sp-layout {
+  height: 100% !important;
+  border: none !important;
+  border-radius: 0 !important;
+}
+
+.sp-preview {
+  height: 100% !important;
+  flex: 1 !important;
+}
+
+.sp-preview-iframe {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Remove Sandpack branding */
+.sp-preview-actions {
+  display: none !important;
+}
+
+/* Monaco editor overrides */
+.monaco-editor .margin {
+  background: #0a0a0f !important;
+}
+
+/* Smooth transitions */
+* {
+  transition-property: background-color, border-color, color, opacity;
+  transition-timing-function: ease;
+  transition-duration: 100ms;
+}
+
+/* But not layout transitions */
+[class*="transition-all"],
+[class*="transition-transform"] {
+  transition-property: all, transform;
+}
