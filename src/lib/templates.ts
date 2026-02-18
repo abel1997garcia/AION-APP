@@ -390,6 +390,157 @@ export default function Dashboard() {
       '/index.css': 'body { margin: 0; }',
     },
   },
+  {
+    id: 'mobile-app',
+    name: 'App Móvil',
+    description: 'Diseño nativo para iOS y Android, listo para App Store y Google Play',
+    template: 'react',
+    icon: '📱',
+    color: '#22c55e',
+    activeFile: '/App.tsx',
+    files: {
+      '/App.tsx': `import { useState } from "react";
+
+const cards = [
+  { id: 1, emoji: "🎯", title: "Mis Metas", desc: "3 objetivos activos", color: "#7c3aed" },
+  { id: 2, emoji: "📊", title: "Estadísticas", desc: "Ver progreso", color: "#3b82f6" },
+  { id: 3, emoji: "🏆", title: "Logros", desc: "12 conseguidos", color: "#22c55e" },
+  { id: 4, emoji: "📅", title: "Agenda", desc: "2 eventos hoy", color: "#f97316" },
+];
+
+const navItems = [
+  { emoji: "🏠", label: "Inicio" },
+  { emoji: "🔍", label: "Explorar" },
+  { emoji: "➕", label: "" },
+  { emoji: "🔔", label: "Alertas" },
+  { emoji: "👤", label: "Perfil" },
+];
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState(0);
+  const [liked, setLiked] = useState<Record<number, boolean>>({});
+
+  return (
+    <div style={{
+      maxWidth: "100%",
+      minHeight: "100vh",
+      background: "#f8fafc",
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif",
+      display: "flex",
+      flexDirection: "column",
+      overflowX: "hidden",
+    }}>
+      {/* Status bar space */}
+      <div style={{ height: "env(safe-area-inset-top, 44px)", background: "linear-gradient(135deg, #7c3aed, #5b21b6)" }} />
+
+      {/* Header */}
+      <div style={{
+        background: "linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%)",
+        padding: "16px 20px 24px",
+        color: "white",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div>
+            <p style={{ margin: 0, fontSize: 13, opacity: 0.75 }}>Buenos días 👋</p>
+            <h1 style={{ margin: "2px 0 0", fontSize: 26, fontWeight: 800, letterSpacing: -0.5 }}>Mi App</h1>
+          </div>
+          <div style={{
+            width: 44, height: 44, borderRadius: "50%",
+            background: "rgba(255,255,255,0.2)",
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22,
+          }}>👤</div>
+        </div>
+        {/* Stats strip */}
+        <div style={{
+          background: "rgba(255,255,255,0.12)", borderRadius: 16,
+          padding: "12px 16px", display: "flex", justifyContent: "space-around",
+        }}>
+          {[["42", "Días"], ["8.4K", "Puntos"], ["#12", "Ranking"]].map(([val, label]) => (
+            <div key={label} style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 20, fontWeight: 800 }}>{val}</div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{ flex: 1, padding: "20px 16px", overflowY: "auto" }}>
+        <h2 style={{ margin: "0 0 14px", fontSize: 17, fontWeight: 700, color: "#1e293b" }}>
+          Acciones rápidas
+        </h2>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
+          {cards.map(card => (
+            <div key={card.id} style={{
+              background: "white", borderRadius: 18, padding: 16,
+              boxShadow: "0 2px 12px rgba(0,0,0,0.06)", cursor: "pointer",
+            }}>
+              <div style={{
+                width: 44, height: 44, borderRadius: 12,
+                background: card.color + "18",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 24, marginBottom: 10,
+              }}>{card.emoji}</div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: "#1e293b", marginBottom: 3 }}>{card.title}</div>
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>{card.desc}</div>
+            </div>
+          ))}
+        </div>
+
+        <h2 style={{ margin: "0 0 12px", fontSize: 17, fontWeight: 700, color: "#1e293b" }}>
+          Actividad reciente
+        </h2>
+        {[
+          { text: "Completaste el reto diario", emoji: "🏆", time: "1h" },
+          { text: "Nuevo logro desbloqueado", emoji: "⭐", time: "3h" },
+          { text: "Racha de 42 días consecutivos", emoji: "🔥", time: "1d" },
+        ].map((item, i) => (
+          <div key={i} style={{
+            background: "white", borderRadius: 14, padding: "14px 16px",
+            marginBottom: 10, display: "flex", alignItems: "center", gap: 12,
+            boxShadow: "0 1px 6px rgba(0,0,0,0.05)",
+          }}>
+            <div style={{ fontSize: 28 }}>{item.emoji}</div>
+            <div style={{ flex: 1, fontSize: 14, color: "#475569", fontWeight: 500 }}>{item.text}</div>
+            <div style={{ fontSize: 11, color: "#94a3b8" }}>{item.time}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Bottom nav */}
+      <div style={{
+        display: "flex", background: "white",
+        borderTop: "1px solid #f1f5f9",
+        padding: "8px 0",
+        paddingBottom: "env(safe-area-inset-bottom, 8px)",
+        boxShadow: "0 -4px 24px rgba(0,0,0,0.06)",
+        position: "sticky", bottom: 0,
+      }}>
+        {navItems.map((item, i) => (
+          <button key={i} onClick={() => setActiveTab(i)} style={{
+            flex: 1, display: "flex", flexDirection: "column", alignItems: "center",
+            gap: 3, border: "none", cursor: "pointer",
+            background: i === 2 ? "#7c3aed" : "none",
+            color: i === 2 ? "white" : activeTab === i ? "#7c3aed" : "#94a3b8",
+            borderRadius: i === 2 ? "50%" : 0,
+            width: i === 2 ? 52 : "auto",
+            height: i === 2 ? 52 : "auto",
+            margin: i === 2 ? "-14px auto 0" : 0,
+            fontWeight: activeTab === i ? 600 : 400,
+            padding: i === 2 ? 0 : "4px 0",
+          }}>
+            <span style={{ fontSize: i === 2 ? 26 : 22 }}>{item.emoji}</span>
+            {item.label && <span style={{ fontSize: 10 }}>{item.label}</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}`,
+      '/index.css': `* { box-sizing: border-box; margin: 0; padding: 0; }
+body { overscroll-behavior: none; }`,
+    },
+  },
 ]
 
 export const DEFAULT_TEMPLATE = TEMPLATES[0]
