@@ -4,6 +4,8 @@ Generador de Ideas de Video
 ---------------------------
 Genera ideas originales para videos basadas en una temática,
 evitando repetir títulos ya existentes o ideas ya generadas.
+
+Soporta múltiples bases de datos con el flag --db.
 """
 
 import json
@@ -25,19 +27,33 @@ try:
 except ImportError:
     pass
 
-DATABASE_PATH = Path(__file__).parent / "database.json"
+BASES_DIR = Path(__file__).parent / "bases"
+BASES_DIR.mkdir(exist_ok=True)
 
 
-def cargar_base_datos() -> dict:
-    if not DATABASE_PATH.exists():
+def resolver_db_path(nombre: str) -> Path:
+    """Convierte un nombre de base de datos en su ruta de archivo."""
+    nombre = nombre.strip().lower().replace(" ", "_")
+    if not nombre.endswith(".json"):
+        nombre += ".json"
+    return BASES_DIR / nombre
+
+
+def cargar_base_datos(db_path: Path) -> dict:
+    if not db_path.exists():
         return {"titulos_existentes": [], "ideas_generadas": []}
-    with open(DATABASE_PATH, "r", encoding="utf-8") as f:
+    with open(db_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def guardar_base_datos(datos: dict):
-    with open(DATABASE_PATH, "w", encoding="utf-8") as f:
+def guardar_base_datos(datos: dict, db_path: Path):
+    with open(db_path, "w", encoding="utf-8") as f:
         json.dump(datos, f, ensure_ascii=False, indent=2)
+
+
+def listar_bases() -> list[str]:
+    """Lista los nombres de todas las bases de datos disponibles."""
+    return sorted([p.stem for p in BASES_DIR.glob("*.json")])
 
 
 def construir_lista_titulos(datos: dict) -> str:
@@ -54,8 +70,7 @@ def construir_lista_titulos(datos: dict) -> str:
 def generar_idea(tematica: str, datos: dict) -> dict:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("ERROR: Define ANTHROPIC_API_KEY en tu archivo .env o como variable de entorno.")
-        sys.exit(1)
+        raise RuntimeError("Define ANTHROPIC_API_KEY en tu archivo .env o como variable de entorno.")
 
     cliente = anthropic.Anthropic(api_key=api_key)
     lista_titulos = construir_lista_titulos(datos)
@@ -89,11 +104,9 @@ DESCRIPCIÓN: [la descripción en texto corrido]"""
 def parsear_respuesta(respuesta: str) -> dict:
     titulo = ""
     descripcion = ""
-
-    lineas = respuesta.split("\n")
     modo = None
 
-    for linea in lineas:
+    for linea in respuesta.split("\n"):
         linea = linea.strip()
         if linea.startswith("TÍTULO:"):
             titulo = linea.replace("TÍTULO:", "").strip()
@@ -113,36 +126,37 @@ def parsear_respuesta(respuesta: str) -> dict:
 
 
 def mostrar_idea(idea: dict):
-    separador = "─" * 60
-    print(f"\n{separador}")
+    sep = "─" * 60
+    print(f"\n{sep}")
     print(f"TÍTULO: {idea['titulo']}")
-    print(f"{separador}")
+    print(f"{sep}")
     print(f"\n{idea['descripcion']}\n")
-    print(separador)
+    print(sep)
 
 
-def agregar_titulos_existentes(titulos: list[str]):
-    datos = cargar_base_datos()
+def agregar_titulos_existentes(titulos: list[str], db_path: Path):
+    datos = cargar_base_datos(db_path)
     nuevos = 0
     for titulo in titulos:
         titulo = titulo.strip()
         if titulo and titulo not in datos["titulos_existentes"]:
             datos["titulos_existentes"].append(titulo)
             nuevos += 1
-    guardar_base_datos(datos)
-    print(f"Se añadieron {nuevos} título(s) a la base de datos.")
+    guardar_base_datos(datos, db_path)
+    print(f"Se añadieron {nuevos} título(s) a '{db_path.stem}'.")
 
 
-def listar_todo():
-    datos = cargar_base_datos()
-    print("\n=== TÍTULOS EXISTENTES ===")
+def listar_todo(db_path: Path):
+    datos = cargar_base_datos(db_path)
+    print(f"\n=== BASE: {db_path.stem.upper()} ===")
+    print("\n-- TÍTULOS EXISTENTES --")
     if datos["titulos_existentes"]:
         for t in datos["titulos_existentes"]:
             print(f"  • {t}")
     else:
         print("  (ninguno)")
 
-    print("\n=== IDEAS GENERADAS ===")
+    print("\n-- IDEAS GENERADAS --")
     if datos["ideas_generadas"]:
         for i, idea in enumerate(datos["ideas_generadas"], 1):
             fecha = idea.get("fecha", "")
@@ -159,57 +173,66 @@ def main():
         epilog="""
 Ejemplos de uso:
   python generar_idea.py -t "productividad personal"
-  python generar_idea.py -t "mindset y mentalidad"
-  python generar_idea.py --añadir "Cómo despertar temprano" "Los 5 hábitos del éxito"
-  python generar_idea.py --listar
+  python generar_idea.py -t "finanzas" --db finanzas
+  python generar_idea.py --añadir "Título 1" "Título 2" --db mindset
+  python generar_idea.py --listar --db productividad
+  python generar_idea.py --listar-bases
         """
     )
-    parser.add_argument(
-        "-t", "--tematica",
-        type=str,
-        help="Temática sobre la que generar la idea de video."
-    )
-    parser.add_argument(
-        "--añadir",
-        nargs="+",
-        metavar="TÍTULO",
-        help="Añadir títulos de videos ya existentes a la base de datos."
-    )
-    parser.add_argument(
-        "--listar",
-        action="store_true",
-        help="Mostrar todos los títulos y las ideas ya generadas."
-    )
+    parser.add_argument("-t", "--tematica", type=str,
+                        help="Temática sobre la que generar la idea.")
+    parser.add_argument("--db", type=str, default="default",
+                        help="Nombre de la base de datos a usar (default: 'default').")
+    parser.add_argument("--añadir", nargs="+", metavar="TÍTULO",
+                        help="Añadir títulos existentes a la base de datos.")
+    parser.add_argument("--listar", action="store_true",
+                        help="Mostrar todos los títulos e ideas de una base.")
+    parser.add_argument("--listar-bases", action="store_true",
+                        help="Mostrar todas las bases de datos disponibles.")
 
     args = parser.parse_args()
+    db_path = resolver_db_path(args.db)
+
+    if args.listar_bases:
+        bases = listar_bases()
+        print("\nBases de datos disponibles:")
+        for b in bases:
+            print(f"  • {b}")
+        print()
+        return
 
     if args.listar:
-        listar_todo()
+        listar_todo(db_path)
         return
 
     if args.añadir:
-        agregar_titulos_existentes(args.añadir)
+        agregar_titulos_existentes(args.añadir, db_path)
         return
 
     if args.tematica:
         tematica = args.tematica
     else:
         print("Generador de Ideas de Video")
+        print(f"Base de datos: {db_path.stem}")
         print("────────────────────────────")
         tematica = input("¿Sobre qué temática quieres la idea? ").strip()
         if not tematica:
             print("ERROR: Debes indicar una temática.")
             sys.exit(1)
 
-    print(f"\nGenerando idea sobre: \"{tematica}\"...")
+    print(f"\nGenerando idea sobre: \"{tematica}\" en '{db_path.stem}'...")
 
-    datos = cargar_base_datos()
-    idea = generar_idea(tematica, datos)
+    datos = cargar_base_datos(db_path)
+    try:
+        idea = generar_idea(tematica, datos)
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     idea["fecha"] = datetime.now().strftime("%Y-%m-%d")
     idea["tematica"] = tematica
     datos["ideas_generadas"].append(idea)
-    guardar_base_datos(datos)
+    guardar_base_datos(datos, db_path)
 
     mostrar_idea(idea)
 

@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Generador de Ideas de Video</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    [x-cloak] { display: none; }
+    .fade-in { animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen flex flex-col">
+
+  <!-- HEADER -->
+  <header class="border-b border-zinc-800 px-6 py-4 flex items-center gap-3">
+    <div class="w-7 h-7 bg-violet-500 rounded-md flex items-center justify-center text-sm font-bold">V</div>
+    <h1 class="text-lg font-semibold tracking-tight">Generador de Ideas de Video</h1>
+  </header>
+
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- SIDEBAR -->
+    <aside class="w-60 border-r border-zinc-800 flex flex-col p-4 gap-2 overflow-y-auto">
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Mis bases</span>
+        <button onclick="abrirModalNuevaBase()"
+          class="w-6 h-6 rounded bg-violet-600 hover:bg-violet-500 text-white flex items-center justify-center text-lg leading-none transition">+</button>
+      </div>
+      <div id="lista-bases" class="flex flex-col gap-1">
+        <p class="text-xs text-zinc-500 mt-2">Cargando...</p>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="flex-1 flex flex-col overflow-hidden">
+      <div class="flex-1 overflow-y-auto p-6 flex flex-col gap-6 max-w-3xl w-full mx-auto">
+
+        <!-- CABECERA DE LA BASE ACTIVA -->
+        <div class="flex items-center gap-2">
+          <span class="text-zinc-400 text-sm">Base activa:</span>
+          <span id="nombre-base-activa" class="font-semibold text-violet-400 capitalize">—</span>
+        </div>
+
+        <!-- FORMULARIO GENERAR -->
+        <section class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 flex flex-col gap-4">
+          <h2 class="font-semibold text-base">Nueva idea</h2>
+          <div class="flex gap-2">
+            <input id="input-tematica" type="text" placeholder="Temática del video (ej: productividad, mindset...)"
+              class="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-violet-500 transition"
+              onkeydown="if(event.key==='Enter') generarIdea()" />
+            <button onclick="generarIdea()" id="btn-generar"
+              class="bg-violet-600 hover:bg-violet-500 active:bg-violet-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition flex items-center gap-2">
+              <span id="btn-texto">Generar</span>
+              <svg id="btn-spinner" class="w-4 h-4 spin hidden" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+              </svg>
+            </button>
+          </div>
+          <div id="error-generar" class="hidden text-sm text-red-400 bg-red-950/50 border border-red-800 rounded-lg px-4 py-2.5"></div>
+        </section>
+
+        <!-- RESULTADO -->
+        <section id="seccion-resultado" class="hidden fade-in">
+          <div class="bg-zinc-900 border border-violet-800/60 rounded-xl p-5 flex flex-col gap-3">
+            <div class="flex items-center gap-2 text-xs text-violet-400 font-medium uppercase tracking-wider">
+              <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
+              Idea generada
+            </div>
+            <h3 id="resultado-titulo" class="text-xl font-bold leading-snug"></h3>
+            <p id="resultado-descripcion" class="text-zinc-300 text-sm leading-relaxed"></p>
+            <div class="flex gap-3 pt-1 text-xs text-zinc-500">
+              <span id="resultado-tematica"></span>
+              <span>·</span>
+              <span id="resultado-fecha"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- HISTORIAL -->
+        <section>
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold text-base">Historial de ideas</h2>
+            <span id="contador-ideas" class="text-xs text-zinc-500"></span>
+          </div>
+          <div id="lista-ideas" class="flex flex-col gap-3">
+            <p class="text-sm text-zinc-500">Selecciona una base de datos para ver el historial.</p>
+          </div>
+        </section>
+
+        <!-- TÍTULOS EXISTENTES -->
+        <section class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 flex flex-col gap-4">
+          <div class="flex items-center justify-between">
+            <h2 class="font-semibold text-base">Títulos ya publicados</h2>
+            <span id="contador-existentes" class="text-xs text-zinc-500"></span>
+          </div>
+          <p class="text-xs text-zinc-500">Añade los títulos de videos que ya tienes publicados para que no se repitan.</p>
+          <div class="flex gap-2">
+            <input id="input-titulo-existente" type="text" placeholder="Título de video ya publicado..."
+              class="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-violet-500 transition"
+              onkeydown="if(event.key==='Enter') añadirTitulo()" />
+            <button onclick="añadirTitulo()"
+              class="bg-zinc-700 hover:bg-zinc-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition">
+              Añadir
+            </button>
+          </div>
+          <div id="lista-existentes" class="flex flex-col gap-1 max-h-48 overflow-y-auto"></div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- MODAL NUEVA BASE -->
+  <div id="modal-nueva-base" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+    <div class="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-sm flex flex-col gap-4">
+      <h3 class="font-semibold text-base">Nueva base de datos</h3>
+      <p class="text-sm text-zinc-400">Elige un nombre para el tema (ej: productividad, finanzas, mindset)</p>
+      <input id="input-nueva-base" type="text" placeholder="Nombre de la temática..."
+        class="bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-violet-500 transition"
+        onkeydown="if(event.key==='Enter') crearBase()" />
+      <div class="flex gap-2 justify-end">
+        <button onclick="cerrarModalNuevaBase()"
+          class="px-4 py-2 rounded-lg text-sm text-zinc-400 hover:text-white transition">Cancelar</button>
+        <button onclick="crearBase()"
+          class="bg-violet-600 hover:bg-violet-500 text-white px-5 py-2 rounded-lg text-sm font-medium transition">Crear</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let baseActiva = null;
+
+    // ── BASES DE DATOS ─────────────────────────────────────
+    async function cargarBases() {
+      const res = await fetch('/api/bases');
+      const data = await res.json();
+      renderizarBases(data.bases);
+      if (data.bases.length > 0 && !baseActiva) {
+        seleccionarBase(data.bases[0]);
+      }
+    }
+
+    function renderizarBases(bases) {
+      const el = document.getElementById('lista-bases');
+      if (bases.length === 0) {
+        el.innerHTML = '<p class="text-xs text-zinc-500 mt-1">Sin bases de datos. Crea una.</p>';
+        return;
+      }
+      el.innerHTML = bases.map(b => `
+        <button onclick="seleccionarBase('${b}')"
+          class="sidebar-btn text-left px-3 py-2 rounded-lg text-sm transition capitalize ${b === baseActiva ? 'bg-violet-600/20 text-violet-300 border border-violet-700/50' : 'text-zinc-300 hover:bg-zinc-800'}"
+          data-base="${b}">
+          ${b}
+        </button>
+      `).join('');
+    }
+
+    async function seleccionarBase(nombre) {
+      baseActiva = nombre;
+      document.getElementById('nombre-base-activa').textContent = nombre;
+      document.querySelectorAll('.sidebar-btn').forEach(btn => {
+        const isActive = btn.dataset.base === nombre;
+        btn.className = `sidebar-btn text-left px-3 py-2 rounded-lg text-sm transition capitalize ${isActive ? 'bg-violet-600/20 text-violet-300 border border-violet-700/50' : 'text-zinc-300 hover:bg-zinc-800'}`;
+      });
+      await cargarDatos();
+    }
+
+    async function cargarDatos() {
+      if (!baseActiva) return;
+      const res = await fetch(`/api/datos?db=${encodeURIComponent(baseActiva)}`);
+      const datos = await res.json();
+      renderizarIdeas(datos.ideas_generadas || []);
+      renderizarExistentes(datos.titulos_existentes || []);
+    }
+
+    // ── IDEAS GENERADAS ────────────────────────────────────
+    function renderizarIdeas(ideas) {
+      const el = document.getElementById('lista-ideas');
+      const contador = document.getElementById('contador-ideas');
+      contador.textContent = `${ideas.length} idea${ideas.length !== 1 ? 's' : ''}`;
+      if (ideas.length === 0) {
+        el.innerHTML = '<p class="text-sm text-zinc-500">Aún no hay ideas generadas en esta base.</p>';
+        return;
+      }
+      el.innerHTML = [...ideas].reverse().map((idea, i) => `
+        <details class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden group">
+          <summary class="flex items-start gap-3 px-5 py-4 cursor-pointer hover:bg-zinc-800/50 transition list-none">
+            <svg class="w-4 h-4 mt-0.5 text-zinc-500 flex-shrink-0 transition group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+            </svg>
+            <div class="flex-1 min-w-0">
+              <p class="font-medium text-sm leading-snug">${escapeHtml(idea.titulo)}</p>
+              <p class="text-xs text-zinc-500 mt-0.5">${idea.tematica ? escapeHtml(idea.tematica) + ' · ' : ''}${idea.fecha || ''}</p>
+            </div>
+          </summary>
+          <div class="px-5 pb-4 pt-1 text-sm text-zinc-300 leading-relaxed border-t border-zinc-800">
+            ${escapeHtml(idea.descripcion)}
+          </div>
+        </details>
+      `).join('');
+    }
+
+    // ── GENERAR IDEA ───────────────────────────────────────
+    async function generarIdea() {
+      const tematica = document.getElementById('input-tematica').value.trim();
+      const errorEl = document.getElementById('error-generar');
+
+      if (!baseActiva) {
+        mostrarError(errorEl, 'Selecciona o crea una base de datos primero.');
+        return;
+      }
+      if (!tematica) {
+        mostrarError(errorEl, 'Escribe una temática antes de generar.');
+        return;
+      }
+
+      errorEl.classList.add('hidden');
+      setGenerando(true);
+
+      try {
+        const res = await fetch('/api/generar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tematica, db: baseActiva })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          mostrarError(errorEl, data.error || 'Error desconocido.');
+          return;
+        }
+
+        mostrarResultado(data.idea);
+        await cargarDatos();
+        document.getElementById('input-tematica').value = '';
+      } catch (e) {
+        mostrarError(errorEl, 'Error de conexión con el servidor.');
+      } finally {
+        setGenerando(false);
+      }
+    }
+
+    function mostrarResultado(idea) {
+      const seccion = document.getElementById('seccion-resultado');
+      document.getElementById('resultado-titulo').textContent = idea.titulo;
+      document.getElementById('resultado-descripcion').textContent = idea.descripcion;
+      document.getElementById('resultado-tematica').textContent = idea.tematica || '';
+      document.getElementById('resultado-fecha').textContent = idea.fecha || '';
+      seccion.classList.remove('hidden');
+      seccion.classList.add('fade-in');
+      seccion.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function setGenerando(estado) {
+      document.getElementById('btn-generar').disabled = estado;
+      document.getElementById('btn-texto').textContent = estado ? 'Generando...' : 'Generar';
+      document.getElementById('btn-spinner').classList.toggle('hidden', !estado);
+    }
+
+    // ── TÍTULOS EXISTENTES ─────────────────────────────────
+    function renderizarExistentes(titulos) {
+      const el = document.getElementById('lista-existentes');
+      const contador = document.getElementById('contador-existentes');
+      contador.textContent = `${titulos.length} título${titulos.length !== 1 ? 's' : ''}`;
+      if (titulos.length === 0) {
+        el.innerHTML = '<p class="text-xs text-zinc-500">Ninguno añadido todavía.</p>';
+        return;
+      }
+      el.innerHTML = titulos.map(t => `
+        <div class="flex items-center gap-2 group py-1">
+          <span class="w-1.5 h-1.5 rounded-full bg-zinc-600 flex-shrink-0"></span>
+          <span class="text-sm text-zinc-400 flex-1 min-w-0 truncate">${escapeHtml(t)}</span>
+          <button onclick="eliminarTitulo('${escapeAttr(t)}')"
+            class="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 transition text-xs flex-shrink-0">✕</button>
+        </div>
+      `).join('');
+    }
+
+    async function añadirTitulo() {
+      const input = document.getElementById('input-titulo-existente');
+      const titulo = input.value.trim();
+      if (!titulo || !baseActiva) return;
+
+      await fetch('/api/añadir-titulos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ titulos: [titulo], db: baseActiva })
+      });
+
+      input.value = '';
+      await cargarDatos();
+    }
+
+    async function eliminarTitulo(titulo) {
+      await fetch('/api/eliminar-titulo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ titulo, db: baseActiva })
+      });
+      await cargarDatos();
+    }
+
+    // ── MODAL NUEVA BASE ───────────────────────────────────
+    function abrirModalNuevaBase() {
+      document.getElementById('modal-nueva-base').classList.remove('hidden');
+      setTimeout(() => document.getElementById('input-nueva-base').focus(), 50);
+    }
+
+    function cerrarModalNuevaBase() {
+      document.getElementById('modal-nueva-base').classList.add('hidden');
+      document.getElementById('input-nueva-base').value = '';
+    }
+
+    async function crearBase() {
+      const nombre = document.getElementById('input-nueva-base').value.trim();
+      if (!nombre) return;
+
+      const res = await fetch('/api/crear-base', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nombre })
+      });
+      const data = await res.json();
+      cerrarModalNuevaBase();
+      await cargarBases();
+      seleccionarBase(data.nombre);
+    }
+
+    // ── UTILIDADES ─────────────────────────────────────────
+    function mostrarError(el, msg) {
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function escapeAttr(str) {
+      return String(str).replace(/'/g, "\\'");
+    }
+
+    document.getElementById('modal-nueva-base').addEventListener('click', function(e) {
+      if (e.target === this) cerrarModalNuevaBase();
+    });
+
+    // ── INIT ───────────────────────────────────────────────
+    cargarBases();
+  </script>
+</body>
+</html>

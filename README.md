@@ -1,6 +1,6 @@
 # AION-APP — Generador de Ideas de Video
 
-Herramienta de línea de comandos que genera ideas originales para videos (título + descripción detallada) basadas en la temática que indiques, garantizando que nunca se repita ninguna idea ya generada o título ya existente.
+Herramienta que genera ideas originales para videos (título + descripción detallada) basadas en la temática que indiques, garantizando que nunca se repita ninguna idea. Disponible como **interfaz web** y como **script de terminal**.
 
 ---
 
@@ -26,68 +26,56 @@ cp .env.example .env
 
 ---
 
-## Uso
+## Interfaz web (recomendado)
 
-### Generar una idea sobre una temática
+```bash
+python app.py
+```
+
+Abre el navegador en **http://localhost:5000**
+
+Desde la interfaz puedes:
+- Crear múltiples bases de datos (una por temática)
+- Generar ideas con un clic
+- Ver el historial completo de ideas (expandibles)
+- Añadir y eliminar títulos ya publicados
+
+---
+
+## Terminal (CLI)
+
+### Generar una idea
 
 ```bash
 python generar_idea.py -t "productividad personal"
-python generar_idea.py -t "mindset y mentalidad"
-python generar_idea.py -t "hábitos de los millonarios"
+python generar_idea.py -t "finanzas" --db finanzas
+python generar_idea.py -t "mindset" --db mindset
 ```
 
-También puedes ejecutarlo sin argumentos y te pedirá la temática de forma interactiva:
+### Múltiples bases de datos con `--db`
+
+Cada `--db` es una base independiente. Si no se especifica, se usa `default`.
 
 ```bash
-python generar_idea.py
+# Genera en la base "productividad"
+python generar_idea.py -t "hábitos" --db productividad
+
+# Genera en la base "finanzas"
+python generar_idea.py -t "inversión" --db finanzas
 ```
 
-### Añadir títulos de videos ya existentes (para que no se repitan)
-
-Si ya tienes videos publicados, añádelos a la base de datos para que el generador los tenga en cuenta:
+### Añadir títulos ya publicados
 
 ```bash
-python generar_idea.py --añadir "Cómo despertar a las 5am" "Los 5 hábitos del éxito" "Por qué fracasan la mayoría"
+python generar_idea.py --añadir "Título 1" "Título 2" --db productividad
 ```
 
-### Ver todos los títulos e ideas registradas
+### Ver historial
 
 ```bash
-python generar_idea.py --listar
+python generar_idea.py --listar --db productividad
+python generar_idea.py --listar-bases
 ```
-
----
-
-## Ejemplo de salida
-
-```
-Generando idea sobre: "disciplina y hábitos"...
-
-────────────────────────────────────────────────────────────
-TÍTULO: El Truco Mental que Usan los Atletas de Élite para No Fallar un Solo Día
-────────────────────────────────────────────────────────────
-
-Los deportistas de alto rendimiento no dependen de la motivación para entrenar
-cada día, sino de un sistema mental concreto que convierte la acción en algo
-casi automático. Este video explora esa diferencia fundamental entre motivación
-y disciplina, explicando cómo el cerebro consolida rutinas a través de ciclos
-de señal, rutina y recompensa. Se debe desarrollar el concepto de "identidad de
-comportamiento": actuar desde lo que uno es, no desde lo que uno siente. El tono
-debe ser directo y práctico, con ejemplos reales de atletas conocidos. El valor
-para el espectador es salir con una técnica específica que puede aplicar esa
-misma noche para no volver a depender del estado de ánimo.
-
-────────────────────────────────────────────────────────────
-```
-
----
-
-## Cómo funciona
-
-1. Al generar una idea, el script lee todos los títulos ya existentes y ya generados desde `database.json`.
-2. Le envía esa lista a Claude como contexto para que no repita ninguno.
-3. Claude genera un título nuevo y una descripción en texto corrido con los detalles necesarios para escribir un guion.
-4. La idea se guarda automáticamente en `database.json` con fecha y temática.
 
 ---
 
@@ -95,9 +83,12 @@ misma noche para no volver a depender del estado de ánimo.
 
 ```
 AION-APP/
-├── generar_idea.py     # Script principal
-├── database.json       # Base de datos de títulos e ideas
-├── requirements.txt    # Dependencias Python
+├── app.py              # Servidor web Flask
+├── generar_idea.py     # Script CLI
+├── bases/              # Bases de datos JSON (una por temática)
+├── templates/
+│   └── index.html      # Interfaz web
+├── requirements.txt    # Dependencias
 ├── .env.example        # Plantilla de configuración
 └── .env                # Tu configuración (no subir a git)
 ```
