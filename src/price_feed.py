@@ -76,6 +76,11 @@ class PriceFeed:
         self._callbacks: List[Callable] = []
         self._running = False
 
+        # Cola de eventos de cierre de vela de entrada (5m).
+        # El bot consume esta cola para analisis event-driven inmediato.
+        # Cada item: (symbol, timeframe)
+        self.candle_close_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+
     # ------------------------------------------------------------------ #
     # API publica                                                          #
     # ------------------------------------------------------------------ #
@@ -201,6 +206,12 @@ class PriceFeed:
                 f"[{symbol}][{tf}] Vela cerrada {candle.close:,.4f} | "
                 f"5m={counts['5m']} 15m={counts['15m']} velas"
             )
+            # Notificar al bot del cierre para analisis inmediato
+            if tf == cfg.TF_ENTRY:  # solo en 5m (TF de entrada)
+                try:
+                    self.candle_close_queue.put_nowait((symbol, tf))
+                except asyncio.QueueFull:
+                    pass  # la cola esta llena, el bot ya tiene trabajo pendiente
         else:
             # Vela activa: actualizar la ultima entrada si todavia esta abierta
             if deq and not deq[-1].is_closed:

@@ -1,21 +1,24 @@
 """
-Gestor de portfolio y tamaño de posicion.
+Gestor de portfolio.
 
-Logica de sizing proporcional basada en Kelly conservador:
-  - Kelly fraction = edge / odds
-  - Aplicamos un factor de descuento (0.25) para ser conservadores
-  - Limite maximo configurable por operacion (MAX_POSITION_PCT)
-  - El tamaño se escala proporcionalmente con la confianza de la señal
+Tracking de posiciones abiertas con logica de salida:
+  - Take-profit: cuando hemos capturado >= TAKE_PROFIT_RATIO del edge
+  - Stop-loss:   cuando la posicion cae >= STOP_LOSS_RATIO del capital apostado
+  - Time-exit:   cuando quedan < MIN_HOURS_TO_EXPIRY horas para expirar
+
+Sizing proporcional con Kelly conservador × confianza MTF.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from config import cfg
 from src.analysis.hedge import HedgeOpportunity
 from src.logger import setup_logger
 
 log = setup_logger("portfolio")
+
+ExitReason = Literal["take_profit", "stop_loss", "time_exit"]
 
 
 @dataclass
@@ -25,37 +28,83 @@ class Position:
     token_id: str
     outcome_label: str
     crypto_symbol: str
-    entry_price: float        # probabilidad al entrar
-    size_usdc: float          # USDC apostados
+    entry_price: float        # probabilidad al entrar (0-1)
+    shares: float             # shares del token que tenemos
+    size_usdc: float          # USDC apostados = shares × entry_price
     fair_price_at_entry: float
+    edge_at_entry: float      # fair_price - entry_price al entrar
     confidence: float
+    hours_to_expiry_at_entry: float
     order_id: Optional[str]
     opened_at: datetime = field(default_factory=datetime.utcnow)
     closed: bool = False
     exit_price: Optional[float] = None
+    exit_reason: Optional[ExitReason] = None
     pnl: Optional[float] = None
 
+    # ── umbrales de salida pre-calculados ──────────────────────────────
     @property
-    def max_win(self) -> float:
-        """Maximo ganado si resolucion correcta."""
-        return self.size_usdc * (1.0 / self.entry_price - 1.0)
+    def take_profit_price(self) -> float:
+        """Precio al que queremos salir para capturar TAKE_PROFIT_RATIO del edge."""
+        return self.entry_price + self.edge_at_entry * cfg.TAKE_PROFIT_RATIO
 
     @property
-    def max_loss(self) -> float:
-        """Maximo perdido si resolucion incorrecta."""
-        return self.size_usdc
+    def stop_loss_price(self) -> float:
+        """Precio por debajo del cual ejecutamos stop-loss."""
+        return self.entry_price * (1.0 - cfg.STOP_LOSS_RATIO)
+
+    # ── valor actual ───────────────────────────────────────────────────
+    def current_value_usdc(self, current_price: float) -> float:
+        """Valor de mercado de nuestra posicion en USDC."""
+        return self.shares * current_price
+
+    def unrealized_pnl(self, current_price: float) -> float:
+        return self.current_value_usdc(current_price) - self.size_usdc
+
+    def unrealized_pnl_pct(self, current_price: float) -> float:
+        if self.size_usdc == 0:
+            return 0.0
+        return self.unrealized_pnl(current_price) / self.size_usdc
+
+    # ── señal de salida ────────────────────────────────────────────────
+    def check_exit_signal(
+        self, current_price: float, hours_to_expiry: float
+    ) -> Optional[ExitReason]:
+        """
+        Evalua si hay que salir de esta posicion.
+
+        Orden de prioridad:
+          1. Time-exit (evitar riesgo de resolucion desconocida)
+          2. Take-profit (asegurar ganancias cuando Polymarket corrige)
+          3. Stop-loss (limitar perdidas)
+        """
+        if hours_to_expiry <= cfg.MIN_HOURS_TO_EXPIRY:
+            return "time_exit"
+
+        if current_price >= self.take_profit_price:
+            return "take_profit"
+
+        if current_price <= self.stop_loss_price:
+            return "stop_loss"
+
+        return None
 
     def __str__(self) -> str:
-        status = "ABIERTA" if not self.closed else f"CERRADA (PnL={self.pnl:+.2f})"
+        status = (
+            "ABIERTA"
+            if not self.closed
+            else f"CERRADA [{self.exit_reason}] PnL={self.pnl:+.2f} USDC"
+        )
         return (
             f"[{self.crypto_symbol}] {self.outcome_label} "
-            f"size={self.size_usdc:.2f} USDC @ {self.entry_price:.3f} | {status}"
+            f"{self.shares:.2f}sh @ {self.entry_price:.3f} "
+            f"(tp={self.take_profit_price:.3f} sl={self.stop_loss_price:.3f}) | {status}"
         )
 
 
 class PortfolioManager:
     """
-    Gestiona posiciones abiertas y calcula tamaño optimo de cada operacion.
+    Gestiona posiciones y calcula tamaño optimo de cada operacion.
     """
 
     def __init__(self, initial_balance: float = 0.0):
@@ -72,7 +121,6 @@ class PortfolioManager:
 
     @property
     def capital_at_risk(self) -> float:
-        """USDC actualmente en posiciones abiertas."""
         return sum(p.size_usdc for p in self.open_positions)
 
     @property
@@ -80,72 +128,45 @@ class PortfolioManager:
         return max(0.0, self.balance - self.capital_at_risk)
 
     def can_open_position(self, opportunity: HedgeOpportunity) -> bool:
-        """Verifica si se puede abrir una nueva posicion."""
         if len(self.open_positions) >= cfg.MAX_OPEN_POSITIONS:
-            log.warning(
-                f"Maximo de posiciones abiertas ({cfg.MAX_OPEN_POSITIONS}) alcanzado"
-            )
+            log.warning(f"Max posiciones abiertas ({cfg.MAX_OPEN_POSITIONS}) alcanzado")
             return False
-
-        # Verificar que no estamos ya en este mercado
         for pos in self.open_positions:
             if pos.token_id == opportunity.token_id:
-                log.debug(f"Ya tenemos posicion en token {opportunity.token_id[:8]}")
+                log.debug(f"Ya tenemos posicion en token {opportunity.token_id[:10]}")
                 return False
-
         if self.available_capital < cfg.MIN_ORDER_SIZE:
             log.warning(
-                f"Capital disponible insuficiente: {self.available_capital:.2f} USDC "
-                f"< minimo {cfg.MIN_ORDER_SIZE}"
+                f"Capital insuficiente: {self.available_capital:.2f} USDC "
+                f"< min {cfg.MIN_ORDER_SIZE}"
             )
             return False
-
         return True
 
     def calculate_position_size(self, opportunity: HedgeOpportunity) -> float:
         """
-        Calcula el tamaño optimo de la posicion usando Kelly conservador.
-
-        Kelly formula para apuestas binarias:
-          f* = (p * b - q) / b
-          donde: p = prob de ganar, q = 1-p, b = odds (ganancia por USDC arriesgado)
-
-        Aplicamos descuento y limite maximo.
+        Kelly conservador escalado por confianza MTF.
+        Retorna USDC a apostar.
         """
-        p = opportunity.fair_price          # prob estimada de ganar
+        p = opportunity.fair_price
         market_price = opportunity.market_price
-        b = (1.0 / market_price) - 1.0     # ganancia neta por USDC si ganamos
+        b = (1.0 / market_price) - 1.0  # ganancia neta por USDC si ganamos
 
         if b <= 0 or p <= 0:
             return 0.0
 
         q = 1.0 - p
         kelly_full = (p * b - q) / b
+        kelly_adj = kelly_full * cfg.KELLY_FRACTION * opportunity.confidence
 
-        # Kelly conservador
-        kelly_conservative = kelly_full * cfg.KELLY_FRACTION
-
-        # Escalar por confianza de la señal
-        kelly_adjusted = kelly_conservative * opportunity.confidence
-
-        # Limit por MAX_POSITION_PCT del portfolio total
-        max_fraction = cfg.MAX_POSITION_PCT
-        fraction = min(kelly_adjusted, max_fraction)
-        fraction = max(0.0, fraction)
-
-        # Calcular USDC
+        fraction = max(0.0, min(kelly_adj, cfg.MAX_POSITION_PCT))
         raw_size = self.available_capital * fraction
-
-        # Clamp entre min y max
         size = max(cfg.MIN_ORDER_SIZE, min(raw_size, cfg.MAX_ORDER_SIZE))
-
-        # No apostar más de lo disponible
         size = min(size, self.available_capital)
 
         log.info(
-            f"Sizing: kelly={kelly_full:.3f} conserv={kelly_conservative:.3f} "
-            f"adj={kelly_adjusted:.3f} → {size:.2f} USDC "
-            f"(balance={self.balance:.2f}, disponible={self.available_capital:.2f})"
+            f"Kelly sizing: full={kelly_full:.3f} adj={kelly_adj:.3f} "
+            f"→ {size:.2f} USDC (disponible={self.available_capital:.2f})"
         )
         return round(size, 2)
 
@@ -153,10 +174,12 @@ class PortfolioManager:
         self,
         opportunity: HedgeOpportunity,
         order_id: Optional[str],
-        actual_size: float,
+        size_usdc: float,
     ) -> Position:
         self._position_counter += 1
         pos_id = f"pos_{self._position_counter:04d}"
+        entry_price = opportunity.market_price
+        shares = size_usdc / entry_price if entry_price > 0 else 0.0
 
         position = Position(
             position_id=pos_id,
@@ -164,47 +187,64 @@ class PortfolioManager:
             token_id=opportunity.token_id,
             outcome_label=opportunity.outcome_label,
             crypto_symbol=opportunity.signal.symbol,
-            entry_price=opportunity.market_price,
-            size_usdc=actual_size,
+            entry_price=entry_price,
+            shares=round(shares, 4),
+            size_usdc=size_usdc,
             fair_price_at_entry=opportunity.fair_price,
+            edge_at_entry=opportunity.edge,
             confidence=opportunity.confidence,
+            hours_to_expiry_at_entry=opportunity.hours_to_expiry,
             order_id=order_id,
         )
 
         self.positions[pos_id] = position
-        log.info(f"Posicion abierta: {position}")
+        log.info(
+            f"POSICION ABIERTA {pos_id}: {position} | "
+            f"TP={position.take_profit_price:.4f} SL={position.stop_loss_price:.4f}"
+        )
         return position
 
-    def close_position(self, pos_id: str, exit_price: float) -> Optional[Position]:
+    def close_position(
+        self,
+        pos_id: str,
+        exit_price: float,
+        reason: ExitReason,
+    ) -> Optional[Position]:
         position = self.positions.get(pos_id)
         if not position or position.closed:
             return None
 
         position.closed = True
         position.exit_price = exit_price
+        position.exit_reason = reason
+        # PnL = (exit_price - entry_price) × shares
+        position.pnl = (exit_price - position.entry_price) * position.shares
+        self.balance += position.pnl
 
-        # PnL aproximado: si ganamos (exit=1.0), si perdemos (exit=0.0)
-        if exit_price >= 0.99:
-            position.pnl = position.max_win
-        elif exit_price <= 0.01:
-            position.pnl = -position.max_loss
-        else:
-            position.pnl = position.size_usdc * (exit_price / position.entry_price - 1.0)
-
-        self.balance += position.pnl if position.pnl else 0.0
-        log.info(f"Posicion cerrada: {position}")
+        pnl_pct = (position.pnl / position.size_usdc * 100) if position.size_usdc else 0
+        log.info(
+            f"POSICION CERRADA {pos_id} [{reason.upper()}]: "
+            f"PnL={position.pnl:+.2f} USDC ({pnl_pct:+.1f}%) | "
+            f"entry={position.entry_price:.4f} exit={exit_price:.4f}"
+        )
         return position
 
     def print_summary(self) -> None:
-        log.info("=" * 60)
+        closed = [p for p in self.positions.values() if p.closed]
+        total_pnl = sum(p.pnl or 0 for p in closed)
+        wins = sum(1 for p in closed if (p.pnl or 0) > 0)
+        losses = len(closed) - wins
+
+        log.info("=" * 65)
         log.info(f"PORTFOLIO SUMMARY | Balance: {self.balance:.2f} USDC")
-        log.info(f"  Posiciones abiertas: {len(self.open_positions)}")
-        log.info(f"  Capital en riesgo:   {self.capital_at_risk:.2f} USDC")
-        log.info(f"  Capital disponible:  {self.available_capital:.2f} USDC")
+        log.info(f"  Abiertas:   {len(self.open_positions)} | En riesgo: {self.capital_at_risk:.2f} USDC")
+        log.info(f"  Disponible: {self.available_capital:.2f} USDC")
         for pos in self.open_positions:
             log.info(f"  → {pos}")
-        closed = [p for p in self.positions.values() if p.closed]
         if closed:
-            total_pnl = sum(p.pnl or 0 for p in closed)
-            log.info(f"  Posiciones cerradas: {len(closed)} | PnL total: {total_pnl:+.2f} USDC")
-        log.info("=" * 60)
+            win_rate = wins / len(closed) * 100
+            log.info(
+                f"  Cerradas:   {len(closed)} | PnL total: {total_pnl:+.2f} USDC | "
+                f"Win rate: {win_rate:.0f}% ({wins}W/{losses}L)"
+            )
+        log.info("=" * 65)

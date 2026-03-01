@@ -1,14 +1,16 @@
 """
 Orquestador principal del trading bot (multi-timeframe 5m/15m).
 
-Flujo:
-  1. Binance WebSocket → velas 5m + 15m + ticker en tiempo real
-  2. Cada 60s: analisis MTF (15m tendencia + 5m entrada)
-  3. Obtener mercados activos de Polymarket (cache 5 min)
-  4. Detectar oportunidades de hedge (precio Binance vs probabilidad Polymarket)
-  5. Calcular tamaño proporcional (Kelly conservador × confianza MTF)
-  6. Ejecutar orden en Polymarket antes de que corrija el mercado
-  7. Monitorear posiciones abiertas
+Flujo de entrada:
+  1. Binance WS cierra vela de 5m → evento en candle_close_queue
+  2. Bot despierta y ejecuta analisis MTF (5m timing + 15m tendencia)
+  3. HedgeDetector compara precio Binance vs probabilidad Polymarket
+  4. Si edge >= threshold: place_order en CLOB (shares calculados correctamente)
+
+Flujo de salida (loop paralelo cada 30s):
+  5. Para cada posicion abierta: consultar precio actual en CLOB
+  6. check_exit_signal → take_profit / stop_loss / time_exit
+  7. Si señal de salida: sell_shares en CLOB → close_position en portfolio
 """
 import asyncio
 import time
@@ -19,26 +21,17 @@ from src.analysis.hedge import HedgeDetector, HedgeOpportunity
 from src.analysis.predictor import MTFSignal, TechnicalPredictor
 from src.logger import setup_logger
 from src.polymarket.client import Market, PolymarketClient
-from src.portfolio import PortfolioManager
+from src.portfolio import ExitReason, PortfolioManager, Position
 from src.price_feed import PriceFeed, TickerData
 
 log = setup_logger("bot")
 
 
 class TradingBot:
-    """
-    Bot de trading Binance → Polymarket hedge (multi-timeframe 5m/15m).
-    """
+    """Bot de trading Binance → Polymarket hedge (MTF 5m/15m)."""
 
-    MARKET_REFRESH_INTERVAL = 300   # segundos entre actualizacion de mercados
-    # Ciclo cada 60s: las velas de 5m cierran cada 300s, con 60s capturamos
-    # rapidamente cada nuevo cierre sin saturar la CPU
-    ANALYSIS_INTERVAL = 60
-    BALANCE_REFRESH_INTERVAL = 60   # segundos entre actualizacion de balance
-    # Warmup minimo: necesitamos EMA_SLOW_5M (21) velas de 5m = 105 min reales.
-    # Empezamos el loop de analisis a los 2 min; el predictor descartara
-    # internamente hasta tener suficientes velas.
-    WARMUP_SECONDS = 120
+    MARKET_REFRESH_INTERVAL = 300   # 5 min entre refrescos de mercados Polymarket
+    WARMUP_SECONDS = 120            # espera inicial mientras se acumulan velas
 
     def __init__(self):
         self.feed = PriceFeed(cfg.TRACKED_SYMBOLS)
@@ -49,46 +42,45 @@ class TradingBot:
 
         self._markets: List[Market] = []
         self._last_market_refresh: float = 0
-        self._last_analysis: float = 0
-        self._last_balance_refresh: float = 0
         self._running = False
 
-    async def start(self) -> None:
-        log.info("=" * 60)
-        log.info("  AION CRYPTO TRADING BOT - INICIANDO (MTF 5m/15m)")
-        log.info(f"  Simbolos:         {cfg.TRACKED_SYMBOLS}")
-        log.info(f"  Timeframes:       {cfg.TF_ENTRY} (entrada) + {cfg.TF_TREND} (tendencia)")
-        log.info(f"  Max posicion:     {cfg.MAX_POSITION_PCT*100:.0f}%")
-        log.info(f"  Edge minimo:      {cfg.MIN_EDGE_THRESHOLD*100:.0f}%")
-        log.info(f"  Confianza minima: {cfg.MIN_CONFIDENCE*100:.0f}%")
-        log.info(f"  Ciclo analisis:   {self.ANALYSIS_INTERVAL}s")
-        log.info("=" * 60)
+    # ------------------------------------------------------------------ #
+    # Lifecycle                                                            #
+    # ------------------------------------------------------------------ #
 
-        # Inicializar Polymarket client
+    async def start(self) -> None:
+        log.info("=" * 65)
+        log.info("  AION CRYPTO TRADING BOT  [MTF 5m/15m | Polymarket Hedge]")
+        log.info(f"  Simbolos:       {cfg.TRACKED_SYMBOLS}")
+        log.info(f"  Timeframes:     {cfg.TF_ENTRY} entrada + {cfg.TF_TREND} tendencia")
+        log.info(f"  Max posicion:   {cfg.MAX_POSITION_PCT*100:.0f}%  "
+                 f"Edge min: {cfg.MIN_EDGE_THRESHOLD*100:.0f}%  "
+                 f"Conf min: {cfg.MIN_CONFIDENCE*100:.0f}%")
+        log.info(f"  Take-profit:    +{cfg.TAKE_PROFIT_RATIO*100:.0f}% del edge   "
+                 f"Stop-loss: -{cfg.STOP_LOSS_RATIO*100:.0f}% capital")
+        log.info(f"  Time-exit:      <{cfg.MIN_HOURS_TO_EXPIRY:.0f}h para expirar")
+        log.info("=" * 65)
+
         await self.poly_client.initialize()
 
-        # Obtener balance inicial
         balance = await self.poly_client.get_usdc_balance()
         self.portfolio.update_balance(balance)
         log.info(f"Balance USDC: {balance:.2f}")
 
         if balance < cfg.MIN_ORDER_SIZE:
             log.warning(
-                f"Balance ({balance:.2f} USDC) menor al minimo por operacion "
-                f"({cfg.MIN_ORDER_SIZE} USDC). El bot monitoreara pero no operara."
+                f"Balance ({balance:.2f} USDC) < minimo por operacion "
+                f"({cfg.MIN_ORDER_SIZE} USDC). Monitoreando sin operar."
             )
 
-        # Cargar mercados iniciales
         await self._refresh_markets()
-
-        # Registrar callback de precio
         self.feed.add_callback(self._on_ticker)
-
-        # Lanzar tareas
         self._running = True
+
         await asyncio.gather(
             self.feed.start(),
             self._analysis_loop(),
+            self._position_monitor_loop(),
             self._balance_loop(),
             return_exceptions=True,
         )
@@ -98,149 +90,223 @@ class TradingBot:
         await self.feed.stop()
         await self.poly_client.close()
         self.portfolio.print_summary()
-        log.info("Bot detenido correctamente.")
+        log.info("Bot detenido.")
 
     # ------------------------------------------------------------------ #
-    # Callbacks y loops                                                    #
+    # Loop de analisis — EVENT-DRIVEN al cierre de cada vela de 5m        #
     # ------------------------------------------------------------------ #
-
-    async def _on_ticker(self, ticker: TickerData) -> None:
-        """Callback llamado en cada tick de precio."""
-        # Por ahora solo logueamos a DEBUG; el analisis va en el loop separado
-        log.debug(f"[{ticker.symbol}] ${ticker.price:,.2f}")
 
     async def _analysis_loop(self) -> None:
-        """Loop principal de analisis y trading."""
-        log.info(f"Warmup inicial {self.WARMUP_SECONDS}s (acumulando velas 5m/15m)...")
+        """
+        Analisis disparado POR EVENTO al cierre de cada vela de 5m.
+        Fallback por timeout cada 90s si no llegan eventos.
+        """
+        log.info(f"Warmup {self.WARMUP_SECONDS}s (acumulando velas 5m/15m)...")
         await asyncio.sleep(self.WARMUP_SECONDS)
 
         while self._running:
             try:
-                await self._run_analysis_cycle()
+                # Esperar evento de cierre de vela de 5m (timeout = fallback)
+                symbol, tf = await asyncio.wait_for(
+                    self.feed.candle_close_queue.get(),
+                    timeout=90.0,
+                )
+                log.debug(f"Vela {tf} cerrada para {symbol} → analizando")
+                await self._analyze_symbol(symbol)
+            except asyncio.TimeoutError:
+                # Fallback: analizar todos los simbolos
+                log.debug("Timeout de evento → analisis de fallback")
+                for sym in cfg.TRACKED_SYMBOLS:
+                    if self._running:
+                        await self._analyze_symbol(sym)
             except Exception as e:
-                log.error(f"Error en ciclo de analisis: {e}", exc_info=True)
+                log.error(f"Error en analysis_loop: {e}", exc_info=True)
 
-            await asyncio.sleep(self.ANALYSIS_INTERVAL)
-
-    async def _balance_loop(self) -> None:
-        """Actualiza el balance periodicamente."""
-        while self._running:
-            await asyncio.sleep(self.BALANCE_REFRESH_INTERVAL)
-            try:
-                balance = await self.poly_client.get_usdc_balance()
-                self.portfolio.update_balance(balance)
-                log.info(f"Balance actualizado: {balance:.2f} USDC")
-            except Exception as e:
-                log.warning(f"Error actualizando balance: {e}")
-
-    # ------------------------------------------------------------------ #
-    # Ciclo de analisis                                                    #
-    # ------------------------------------------------------------------ #
-
-    async def _run_analysis_cycle(self) -> None:
-        """
-        Un ciclo completo: analizar MTF → detectar hedge → operar.
-        """
+    async def _analyze_symbol(self, symbol: str) -> None:
+        """Analiza un simbolo y ejecuta oportunidades si las hay."""
         now = time.time()
-
-        # Refrescar mercados si toca
         if now - self._last_market_refresh > self.MARKET_REFRESH_INTERVAL:
             await self._refresh_markets()
-
         if not self._markets:
-            log.warning("No hay mercados disponibles de Polymarket. Reintentando en el proximo ciclo.")
             return
 
-        all_opportunities: List[HedgeOpportunity] = []
-
-        for symbol in cfg.TRACKED_SYMBOLS:
-            # Analisis multi-timeframe (5m entrada + 15m tendencia)
-            signal: Optional[MTFSignal] = self.predictor.analyze_mtf(symbol)
-            if signal is None:
-                # Sin datos suficientes todavia — mostrar estado de acumulacion
-                counts = self.feed.candle_counts(symbol)
-                log.debug(
-                    f"[{symbol}] Acumulando velas | "
-                    f"5m={counts.get('5m', 0)}/{cfg.EMA_SLOW_5M+5} "
-                    f"15m={counts.get('15m', 0)}/{cfg.EMA_SLOW_15M+5}"
-                )
-                continue
-
-            log.info(signal.log_summary())
-
-            if not signal.is_actionable():
-                reason = (
-                    "discrepancia TF" if not signal.tfs_agree and signal.signal_15m
-                    else f"conf={signal.confidence:.2f} < {cfg.MIN_CONFIDENCE}"
-                    if signal.confidence < cfg.MIN_CONFIDENCE
-                    else f"mom={signal.momentum:.4f} < {cfg.PRICE_MOVE_THRESHOLD}"
-                )
-                log.debug(f"[{symbol}] No accionable: {reason}")
-                continue
-
-            opps = self.hedge_detector.find_opportunities(signal, self._markets)
-            all_opportunities.extend(opps)
-
-        if not all_opportunities:
-            log.debug("Sin oportunidades de hedge en este ciclo.")
+        signal: Optional[MTFSignal] = self.predictor.analyze_mtf(symbol)
+        if signal is None:
+            counts = self.feed.candle_counts(symbol)
+            log.debug(
+                f"[{symbol}] Acumulando | "
+                f"5m={counts.get('5m', 0)}/{cfg.EMA_SLOW_5M+5} "
+                f"15m={counts.get('15m', 0)}/{cfg.EMA_SLOW_15M+5}"
+            )
             return
 
-        log.info(f"Oportunidades detectadas: {len(all_opportunities)}")
+        log.info(signal.log_summary())
 
-        # Ejecutar las mejores oportunidades
-        for opp in all_opportunities[:3]:  # max 3 por ciclo
-            if not self.portfolio.can_open_position(opp):
-                continue
+        if not signal.is_actionable():
+            if not signal.tfs_agree and signal.signal_15m and signal.signal_15m.direction != "neutral":
+                log.debug(f"[{symbol}] TFs discrepan → abstenerse")
+            return
 
-            size = self.portfolio.calculate_position_size(opp)
-            if size < cfg.MIN_ORDER_SIZE:
-                log.warning(f"Tamaño calculado ({size:.2f}) menor al minimo. Saltando.")
-                continue
+        opps = self.hedge_detector.find_opportunities(signal, self._markets)
+        for opp in opps[:2]:  # max 2 operaciones por simbolo por ciclo
+            if self.portfolio.can_open_position(opp):
+                await self._execute_entry(opp)
 
-            await self._execute_opportunity(opp, size)
+    # ------------------------------------------------------------------ #
+    # Loop de monitoreo de posiciones — SALIDA                            #
+    # ------------------------------------------------------------------ #
 
-    async def _execute_opportunity(
-        self, opp: HedgeOpportunity, size: float
-    ) -> None:
-        """Ejecuta una oportunidad de hedge en Polymarket."""
-        log.info(
-            f"EJECUTANDO: {opp.market.crypto_symbol} {opp.outcome_label} "
-            f"{size:.2f} USDC @ {opp.market_price:.4f} "
-            f"(fair={opp.fair_price:.4f} edge={opp.edge:+.4f})"
+    async def _position_monitor_loop(self) -> None:
+        """
+        Revisa posiciones abiertas cada POSITION_CHECK_INTERVAL segundos.
+        Para cada una consulta el precio actual en CLOB y evalua si salir.
+        """
+        await asyncio.sleep(self.WARMUP_SECONDS + 30)  # esperar tras el warmup
+
+        while self._running:
+            await asyncio.sleep(cfg.POSITION_CHECK_INTERVAL)
+            try:
+                await self._check_all_positions()
+            except Exception as e:
+                log.error(f"Error en position_monitor_loop: {e}", exc_info=True)
+
+    async def _check_all_positions(self) -> None:
+        open_pos = self.portfolio.open_positions
+        if not open_pos:
+            return
+
+        log.debug(f"Revisando {len(open_pos)} posicion(es) abierta(s)...")
+
+        for pos in open_pos:
+            try:
+                await self._check_position(pos)
+            except Exception as e:
+                log.warning(f"Error revisando posicion {pos.position_id}: {e}")
+
+    async def _check_position(self, pos: Position) -> None:
+        """Consulta el precio actual del token y decide si salir."""
+        # Precio al que podemos vender (mejor BID del CLOB)
+        current_price = await self.poly_client.get_token_best_bid(pos.token_id)
+
+        if current_price is None:
+            log.debug(f"[{pos.position_id}] Sin bid disponible, saltando")
+            return
+
+        # Horas hasta expirar (estimado desde la apertura)
+        from datetime import datetime, timezone
+        elapsed_h = (datetime.utcnow() - pos.opened_at).total_seconds() / 3600
+        remaining_h = max(0.0, pos.hours_to_expiry_at_entry - elapsed_h)
+
+        upnl = pos.unrealized_pnl(current_price)
+        upnl_pct = pos.unrealized_pnl_pct(current_price) * 100
+        log.debug(
+            f"[{pos.position_id}] {pos.crypto_symbol} {pos.outcome_label} "
+            f"price={current_price:.4f} upnl={upnl:+.2f}({upnl_pct:+.1f}%) "
+            f"exp={remaining_h:.1f}h TP={pos.take_profit_price:.4f} SL={pos.stop_loss_price:.4f}"
         )
 
-        result = await self.poly_client.place_order(
+        reason: Optional[ExitReason] = pos.check_exit_signal(current_price, remaining_h)
+        if reason:
+            await self._execute_exit(pos, current_price, reason)
+
+    # ------------------------------------------------------------------ #
+    # Ejecucion de ordenes                                                 #
+    # ------------------------------------------------------------------ #
+
+    async def _execute_entry(self, opp: HedgeOpportunity) -> None:
+        """Calcula tamaño, coloca orden de compra y registra posicion."""
+        size_usdc = self.portfolio.calculate_position_size(opp)
+        if size_usdc < cfg.MIN_ORDER_SIZE:
+            log.warning(f"Tamaño calculado {size_usdc:.2f} USDC < minimo. Saltando.")
+            return
+
+        log.info(
+            f"ENTRADA: {opp.market.crypto_symbol} {opp.outcome_label} "
+            f"{size_usdc:.2f} USDC @ {opp.market_price:.4f} | "
+            f"fair={opp.fair_price:.4f} edge={opp.edge:+.4f} ev={opp.expected_value:.3f}"
+        )
+
+        result = await self.poly_client.buy_usdc(
             token_id=opp.token_id,
-            side="BUY",
-            size=size,
+            usdc_amount=size_usdc,
             price=opp.market_price,
         )
 
         if result.success:
-            position = self.portfolio.open_position(
+            pos = self.portfolio.open_position(
                 opportunity=opp,
                 order_id=result.order_id,
-                actual_size=size,
+                size_usdc=size_usdc,
             )
-            log.info(f"Posicion abierta exitosamente: {position.position_id}")
+            log.info(f"Posicion registrada: {pos.position_id}")
         else:
-            log.error(f"Fallo al ejecutar orden: {result.error}")
+            log.error(f"Orden de entrada fallida: {result.error}")
+
+    async def _execute_exit(
+        self, pos: Position, current_price: float, reason: ExitReason
+    ) -> None:
+        """Vende todos los shares de una posicion y la cierra."""
+        emoji_map = {
+            "take_profit": "TAKE-PROFIT",
+            "stop_loss":   "STOP-LOSS",
+            "time_exit":   "TIME-EXIT",
+        }
+        log.info(
+            f"{emoji_map[reason]} [{pos.position_id}] "
+            f"{pos.crypto_symbol} {pos.outcome_label} | "
+            f"Vendiendo {pos.shares:.4f} shares @ {current_price:.4f} "
+            f"(entry={pos.entry_price:.4f})"
+        )
+
+        # Usar un precio ligeramente inferior al bid para asegurar ejecucion
+        sell_price = round(current_price * 0.995, 4)
+
+        result = await self.poly_client.sell_shares(
+            token_id=pos.token_id,
+            shares=pos.shares,
+            min_price=sell_price,
+        )
+
+        if result.success:
+            self.portfolio.close_position(pos.position_id, current_price, reason)
+        else:
+            log.error(
+                f"Fallo al vender {pos.position_id}: {result.error}. "
+                f"Se reintentara en el proximo ciclo."
+            )
+
+    # ------------------------------------------------------------------ #
+    # Loops auxiliares                                                     #
+    # ------------------------------------------------------------------ #
+
+    async def _on_ticker(self, ticker: TickerData) -> None:
+        log.debug(f"[{ticker.symbol}] ${ticker.price:,.2f}")
+
+    async def _balance_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(60)
+            try:
+                balance = await self.poly_client.get_usdc_balance()
+                self.portfolio.update_balance(balance)
+                log.info(
+                    f"Balance: {balance:.2f} USDC | "
+                    f"En riesgo: {self.portfolio.capital_at_risk:.2f} | "
+                    f"Disponible: {self.portfolio.available_capital:.2f}"
+                )
+            except Exception as e:
+                log.warning(f"Error actualizando balance: {e}")
 
     async def _refresh_markets(self) -> None:
-        """Actualiza la lista de mercados activos de Polymarket."""
-        log.info("Actualizando mercados de Polymarket...")
+        log.info("Actualizando mercados Polymarket...")
         try:
             markets = await self.poly_client.fetch_crypto_markets(cfg.TRACKED_SYMBOLS)
             self._markets = markets
             self._last_market_refresh = time.time()
-
-            # Resumen de mercados
-            by_symbol: Dict[str, int] = {}
+            by_sym: Dict[str, int] = {}
             for m in markets:
-                sym = m.crypto_symbol or "?"
-                by_symbol[sym] = by_symbol.get(sym, 0) + 1
-            summary = ", ".join(f"{k}:{v}" for k, v in sorted(by_symbol.items()))
-            log.info(f"Mercados cargados: {len(markets)} | {summary}")
-
+                s = m.crypto_symbol or "?"
+                by_sym[s] = by_sym.get(s, 0) + 1
+            summary = " | ".join(f"{k}:{v}" for k, v in sorted(by_sym.items()))
+            log.info(f"Mercados: {len(markets)} total | {summary}")
         except Exception as e:
             log.error(f"Error actualizando mercados: {e}")

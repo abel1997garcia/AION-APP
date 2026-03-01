@@ -1,14 +1,18 @@
 """
 Cliente para Polymarket CLOB API.
 Maneja autenticacion, consulta de mercados y ejecucion de ordenes.
+
+Convencion de tallas en Polymarket CLOB:
+  - BUY:  size = shares a comprar.  Coste = shares × price USDC
+  - SELL: size = shares a vender.  Ingreso = shares × price USDC
+  - Para convertir USDC → shares en BUY: shares = usdc / price
 """
 import asyncio
-import time
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-import requests
 
 from config import cfg
 from src.logger import setup_logger
@@ -27,12 +31,9 @@ class Market:
     tokens: List[Dict]  # [{token_id, outcome, price}]
     volume: float
     liquidity: float
-    # Mapeado del simbolo crypto asociado (BTC/ETH/SOL)
     crypto_symbol: Optional[str] = None
-    # Strike price extraido de la pregunta
     strike_price: Optional[float] = None
-    # Direccion: "above" o "below"
-    direction: Optional[str] = None
+    direction: Optional[str] = None  # "above" | "below"
 
 
 @dataclass
@@ -40,7 +41,8 @@ class OrderResult:
     success: bool
     order_id: Optional[str]
     error: Optional[str]
-    size: float
+    size_usdc: float
+    shares: float
     price: float
     side: str
 
@@ -48,13 +50,10 @@ class OrderResult:
 class PolymarketClient:
     """
     Wrapper sobre py-clob-client con helpers para el bot.
-    Soporte para consulta de mercados y ejecucion de ordenes.
     """
 
     GAMMA_MARKETS = f"{cfg.GAMMA_API}/markets"
-    GAMMA_EVENTS = f"{cfg.GAMMA_API}/events"
 
-    # Keywords para detectar mercados de precio crypto
     CRYPTO_KEYWORDS = {
         "BTC": ["bitcoin", "btc"],
         "ETH": ["ethereum", "eth"],
@@ -63,8 +62,8 @@ class PolymarketClient:
         "AVAX": ["avalanche", "avax"],
     }
 
-    DIRECTION_KEYWORDS_ABOVE = ["above", "higher", "over", "exceed", "reach", "surpass", "mas de", "superar"]
-    DIRECTION_KEYWORDS_BELOW = ["below", "lower", "under", "beneath", "drop", "menos de", "caer"]
+    DIRECTION_ABOVE = ["above", "higher", "over", "exceed", "reach", "surpass"]
+    DIRECTION_BELOW = ["below", "lower", "under", "beneath", "drop"]
 
     def __init__(self):
         self._clob_client = None
@@ -73,14 +72,10 @@ class PolymarketClient:
         self._initialized = False
 
     async def initialize(self) -> None:
-        """Inicializa cliente CLOB y credenciales API."""
         if self._initialized:
             return
-
-        # Importar aqui para evitar errores si no esta instalado en modo test
         try:
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
 
             self._clob_client = ClobClient(
                 host=cfg.POLYMARKET_HOST,
@@ -88,23 +83,21 @@ class PolymarketClient:
                 chain_id=cfg.POLYMARKET_CHAIN_ID,
                 funder=cfg.POLYMARKET_FUNDER or None,
             )
-
-            # Obtener/crear credenciales API
             try:
                 self._api_creds = self._clob_client.derive_api_key()
                 log.info(f"API key derivada: {self._api_creds.api_key[:8]}...")
             except Exception as e:
-                log.warning(f"No se pudo derivar API key, creando nueva: {e}")
+                log.warning(f"Derivando API key fallida, creando nueva: {e}")
                 self._api_creds = self._clob_client.create_api_key()
 
             self._clob_client.set_api_creds(self._api_creds)
-            log.info("Polymarket CLOB client inicializado correctamente")
+            log.info("Polymarket CLOB client inicializado")
 
         except ImportError:
-            log.error("py-clob-client no instalado. Ejecuta: pip install py-clob-client")
+            log.error("py-clob-client no instalado. pip install py-clob-client")
             raise
         except Exception as e:
-            log.error(f"Error inicializando Polymarket client: {e}")
+            log.error(f"Error inicializando client: {e}")
             raise
 
         self._session = aiohttp.ClientSession()
@@ -115,30 +108,23 @@ class PolymarketClient:
             await self._session.close()
 
     async def get_usdc_balance(self) -> float:
-        """Retorna balance USDC disponible en Polymarket."""
         try:
-            balance = self._clob_client.get_balance()
-            return float(balance)
+            return float(self._clob_client.get_balance())
         except Exception as e:
             log.error(f"Error obteniendo balance: {e}")
             return 0.0
 
+    # ------------------------------------------------------------------ #
+    # Consulta de mercados                                                 #
+    # ------------------------------------------------------------------ #
+
     async def fetch_crypto_markets(self, symbols: List[str]) -> List[Market]:
-        """
-        Consulta Gamma API y filtra mercados relevantes de precio crypto.
-        """
         markets: List[Market] = []
-
-        params = {
-            "active": "true",
-            "closed": "false",
-            "limit": 200,
-            "offset": 0,
-        }
-
+        params = {"active": "true", "closed": "false", "limit": 200, "offset": 0}
         try:
             async with self._session.get(
-                self.GAMMA_MARKETS, params=params, timeout=aiohttp.ClientTimeout(total=15)
+                self.GAMMA_MARKETS, params=params,
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 data = await resp.json()
 
@@ -152,57 +138,44 @@ class PolymarketClient:
 
             log.info(f"Mercados crypto detectados: {len(markets)}")
             return markets
-
         except Exception as e:
-            log.error(f"Error consultando mercados Gamma: {e}")
+            log.error(f"Error consultando mercados: {e}")
             return []
 
     def _parse_market(self, raw: Dict[str, Any], filter_symbols: List[str]) -> Optional[Market]:
-        """Intenta parsear un mercado como mercado de precio crypto."""
         question = raw.get("question", "").lower()
-        description = raw.get("description", "").lower()
-        text = question + " " + description
+        text = question + " " + raw.get("description", "").lower()
 
-        # Detectar crypto symbol
         crypto_symbol = None
         for sym, keywords in self.CRYPTO_KEYWORDS.items():
             if sym in filter_symbols and any(kw in text for kw in keywords):
                 crypto_symbol = sym
                 break
-
         if not crypto_symbol:
             return None
 
-        # Detectar strike price (numero en la pregunta, ej: $100,000)
-        import re
-        price_match = re.search(r"\$?([\d,]+(?:\.\d+)?)\s*[kK]?", raw.get("question", ""))
         strike_price = None
+        price_match = re.search(r"\$?([\d,]+(?:\.\d+)?)\s*[kK]?", raw.get("question", ""))
         if price_match:
-            num_str = price_match.group(1).replace(",", "")
             try:
+                num_str = price_match.group(1).replace(",", "")
                 strike_price = float(num_str)
-                # Manejar "k" (miles)
                 if "k" in raw.get("question", "").lower():
                     strike_price *= 1000
             except ValueError:
                 pass
 
-        # Detectar direccion
         direction = None
-        if any(kw in text for kw in self.DIRECTION_KEYWORDS_ABOVE):
+        if any(kw in text for kw in self.DIRECTION_ABOVE):
             direction = "above"
-        elif any(kw in text for kw in self.DIRECTION_KEYWORDS_BELOW):
+        elif any(kw in text for kw in self.DIRECTION_BELOW):
             direction = "below"
 
-        # Obtener tokens (YES/NO outcomes)
-        tokens = []
-        for t in raw.get("tokens", []):
-            tokens.append({
-                "token_id": t.get("token_id", ""),
-                "outcome": t.get("outcome", ""),
-                "price": float(t.get("price", 0.5)),
-            })
-
+        tokens = [
+            {"token_id": t.get("token_id", ""), "outcome": t.get("outcome", ""),
+             "price": float(t.get("price", 0.5))}
+            for t in raw.get("tokens", [])
+        ]
         if not tokens:
             return None
 
@@ -221,80 +194,130 @@ class PolymarketClient:
             direction=direction,
         )
 
-    async def get_market_prices(self, condition_id: str) -> Dict[str, float]:
+    # ------------------------------------------------------------------ #
+    # Precios de mercado                                                   #
+    # ------------------------------------------------------------------ #
+
+    async def get_token_best_bid(self, token_id: str) -> Optional[float]:
         """
-        Obtiene precios actuales YES/NO de un mercado via CLOB.
-        Retorna {token_id: precio}
+        Retorna el mejor precio BID para un token (lo que obtendremos al vender).
+        Si no hay bids, retorna None.
         """
         try:
-            orderbook = self._clob_client.get_order_book(condition_id)
-            prices = {}
-            for side in ["bids", "asks"]:
-                for order in getattr(orderbook, side, []):
-                    # Mejor precio disponible
-                    prices[order.get("token_id", "")] = float(order.get("price", 0))
-            return prices
+            book = self._clob_client.get_order_book(token_id)
+            bids = getattr(book, "bids", [])
+            if not bids:
+                return None
+            # bids ordenados de mayor a menor precio
+            best = max(bids, key=lambda b: float(b.get("price", 0)))
+            return float(best.get("price", 0))
         except Exception as e:
-            log.warning(f"Error obteniendo orderbook {condition_id[:8]}: {e}")
-            return {}
+            log.warning(f"Error obteniendo bid para {token_id[:8]}: {e}")
+            return None
 
-    async def place_order(
+    async def get_token_best_ask(self, token_id: str) -> Optional[float]:
+        """
+        Retorna el mejor ASK (precio al que podemos comprar).
+        """
+        try:
+            book = self._clob_client.get_order_book(token_id)
+            asks = getattr(book, "asks", [])
+            if not asks:
+                return None
+            best = min(asks, key=lambda a: float(a.get("price", 1)))
+            return float(best.get("price", 1))
+        except Exception as e:
+            log.warning(f"Error obteniendo ask para {token_id[:8]}: {e}")
+            return None
+
+    # ------------------------------------------------------------------ #
+    # Ejecucion de ordenes                                                 #
+    # ------------------------------------------------------------------ #
+
+    async def buy_usdc(
         self,
         token_id: str,
-        side: str,  # "BUY" o "SELL"
-        size: float,  # en USDC
-        price: float,  # probabilidad 0-1
+        usdc_amount: float,
+        price: float,
+    ) -> OrderResult:
+        """
+        Compra `usdc_amount` USDC del token al precio `price`.
+        Internamente convierte a shares = usdc_amount / price.
+        """
+        if price <= 0:
+            return OrderResult(success=False, order_id=None,
+                               error="Precio invalido", size_usdc=usdc_amount,
+                               shares=0, price=price, side="BUY")
+
+        shares = round(usdc_amount / price, 2)
+        log.info(
+            f"BUY {usdc_amount:.2f} USDC → {shares:.2f} shares @ {price:.4f} | "
+            f"token={token_id[:10]}..."
+        )
+        return await self._place_order(token_id, "BUY", shares, price)
+
+    async def sell_shares(
+        self,
+        token_id: str,
+        shares: float,
+        min_price: float,
+    ) -> OrderResult:
+        """
+        Vende `shares` tokens al precio minimo `min_price`.
+        Usa GTC para que se ejecute al mejor precio disponible.
+        """
+        usdc_value = round(shares * min_price, 2)
+        log.info(
+            f"SELL {shares:.2f} shares @ min {min_price:.4f} "
+            f"(≈{usdc_value:.2f} USDC) | token={token_id[:10]}..."
+        )
+        return await self._place_order(token_id, "SELL", shares, min_price)
+
+    async def _place_order(
+        self,
+        token_id: str,
+        side: str,
+        shares: float,
+        price: float,
         order_type: str = "GTC",
     ) -> OrderResult:
         """
-        Coloca una orden en Polymarket CLOB.
-
-        token_id: ID del token YES o NO
-        side: BUY o SELL
-        size: cantidad en USDC
-        price: precio como probabilidad (0.0-1.0)
+        Coloca orden en CLOB. `shares` es en unidades de token (outcome shares).
         """
+        usdc_value = round(shares * price, 2)
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType, Side
 
-            side_enum = Side.BUY if side.upper() == "BUY" else Side.SELL
+            side_enum = Side.BUY if side == "BUY" else Side.SELL
             type_enum = OrderType.GTC if order_type == "GTC" else OrderType.FOK
 
             order_args = OrderArgs(
                 token_id=token_id,
                 price=round(price, 4),
-                size=round(size, 2),
+                size=round(shares, 2),   # CLOB espera shares, no USDC
                 side=side_enum,
                 type=type_enum,
-            )
-
-            log.info(
-                f"Colocando orden: {side} {size:.2f} USDC @ {price:.4f} | token={token_id[:8]}..."
             )
 
             response = self._clob_client.post_order(order_args, type_enum)
 
             if response and response.get("success"):
-                order_id = response.get("orderID", response.get("order_id", ""))
-                log.info(f"Orden ejecutada: {order_id}")
+                order_id = response.get("orderID", response.get("order_id", "unknown"))
+                log.info(f"Orden {side} ejecutada: {order_id} | {shares:.2f}sh @ {price:.4f}")
                 return OrderResult(
-                    success=True,
-                    order_id=order_id,
-                    error=None,
-                    size=size,
-                    price=price,
-                    side=side,
+                    success=True, order_id=order_id, error=None,
+                    size_usdc=usdc_value, shares=shares, price=price, side=side,
                 )
             else:
-                error_msg = str(response)
-                log.error(f"Orden rechazada: {error_msg}")
-                return OrderResult(success=False, order_id=None, error=error_msg,
-                                   size=size, price=price, side=side)
+                err = str(response)
+                log.error(f"Orden rechazada: {err}")
+                return OrderResult(success=False, order_id=None, error=err,
+                                   size_usdc=usdc_value, shares=shares, price=price, side=side)
 
         except Exception as e:
-            log.error(f"Excepcion al colocar orden: {e}")
+            log.error(f"Excepcion en orden {side}: {e}")
             return OrderResult(success=False, order_id=None, error=str(e),
-                               size=size, price=price, side=side)
+                               size_usdc=usdc_value, shares=shares, price=price, side=side)
 
     async def cancel_order(self, order_id: str) -> bool:
         try:
@@ -302,7 +325,7 @@ class PolymarketClient:
             log.info(f"Orden cancelada: {order_id}")
             return True
         except Exception as e:
-            log.error(f"Error cancelando orden {order_id}: {e}")
+            log.error(f"Error cancelando {order_id}: {e}")
             return False
 
     async def get_open_orders(self) -> List[Dict]:

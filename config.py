@@ -76,6 +76,16 @@ class Config:
     # Kelly fraction conservador
     KELLY_FRACTION: float = 0.25
 
+    # Gestion de salida de posiciones
+    # Salir cuando hayamos capturado este % del edge estimado
+    TAKE_PROFIT_RATIO: float = 0.55
+    # Salir si la posicion cae este % sobre el capital apostado (stop-loss)
+    STOP_LOSS_RATIO: float = 0.20
+    # Siempre salir cuando queden menos de estas horas para expirar
+    MIN_HOURS_TO_EXPIRY: float = 2.0
+    # Segundos entre cada revision de posiciones abiertas
+    POSITION_CHECK_INTERVAL: int = 30
+
     def validate(self) -> None:
         if not self.PRIVATE_KEY or self.PRIVATE_KEY == "0xTU_PRIVATE_KEY_AQUI":
             raise ValueError(
