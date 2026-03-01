@@ -15,7 +15,7 @@ from math import log, sqrt, exp
 from scipy.stats import norm
 
 from config import cfg
-from src.analysis.predictor import PriceSignal
+from src.analysis.predictor import MTFSignal
 from src.logger import setup_logger
 from src.polymarket.client import Market
 
@@ -25,7 +25,7 @@ log = setup_logger("hedge_detector")
 @dataclass
 class HedgeOpportunity:
     market: Market
-    signal: PriceSignal
+    signal: MTFSignal
     # Token que compramos (YES o NO token_id)
     token_id: str
     outcome_label: str          # "YES" o "NO"
@@ -68,7 +68,7 @@ class HedgeDetector:
 
     def find_opportunities(
         self,
-        signal: PriceSignal,
+        signal: MTFSignal,
         markets: List[Market],
     ) -> List[HedgeOpportunity]:
         """
@@ -103,7 +103,7 @@ class HedgeDetector:
         return opportunities
 
     def _evaluate_market(
-        self, signal: PriceSignal, market: Market
+        self, signal: MTFSignal, market: Market
     ) -> Optional[HedgeOpportunity]:
         """
         Evalua si hay oportunidad en un mercado concreto.
@@ -214,18 +214,29 @@ class HedgeDetector:
         return max(0.02, min(0.98, prob))  # clamp para evitar extremos
 
     @staticmethod
-    def _drift_from_signal(signal: PriceSignal) -> float:
+    def _drift_from_signal(signal: MTFSignal) -> float:
         """
-        Convierte la señal tecnica en un drift anualizado.
-        Si el predictor dice "up" con confianza 0.8 y momentum 1%, estimamos
-        un drift positivo que sesga la probabilidad.
+        Convierte la señal MTF en un drift anualizado para el modelo B-S.
+
+        Cuando 5m y 15m coinciden (lead-lag sobre Polymarket) el drift
+        se amplifica: es exactamente la ventana donde el VPS de Lituania
+        tiene ventaja de velocidad antes de que Polymarket corrija.
         """
-        if signal.direction == "up":
-            # Momentum anualizado: momentum por minuto * 525600 min/año (aproximado)
-            return abs(signal.momentum) * signal.confidence * 8.0
-        elif signal.direction == "down":
-            return -abs(signal.momentum) * signal.confidence * 8.0
-        return 0.0
+        base = abs(signal.momentum) * signal.confidence * 8.0
+
+        # Multiplicador por confluencia de TFs
+        if signal.tfs_agree:
+            # Ambos TF apuntan igual → maxima conviccion, drift mas agresivo
+            multiplier = 1.5
+        elif signal.signal_15m is None or signal.signal_15m.direction == "neutral":
+            # Solo tenemos 5m o 15m neutral → drift moderado
+            multiplier = 1.0
+        else:
+            # Discrepancia (no deberia llegar aqui porque direction="neutral")
+            multiplier = 0.0
+
+        drift = base * multiplier
+        return drift if signal.direction == "up" else -drift
 
     @staticmethod
     def _hours_to_expiry(end_date_iso: str) -> float:

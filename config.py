@@ -41,17 +41,37 @@ class Config:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE: str = os.getenv("LOG_FILE", "logs/bot.log")
 
-    # Indicadores tecnicos
-    EMA_FAST: int = 9
+    # Timeframes operativos
+    TF_ENTRY: str = "5m"    # timeframe de entrada/timing (rapido)
+    TF_TREND: str = "15m"   # timeframe de tendencia (lento, contexto)
+
+    # Indicadores tecnicos — 5m (entrada)
+    EMA_FAST_5M: int = 8    # ~40 min
+    EMA_SLOW_5M: int = 21   # ~105 min
+    RSI_PERIOD_5M: int = 14
+    MOMENTUM_WINDOW_5M: int = 6   # 6 velas × 5m = 30 min de momentum
+
+    # Indicadores tecnicos — 15m (tendencia)
+    EMA_FAST_15M: int = 5   # ~75 min
+    EMA_SLOW_15M: int = 10  # ~150 min
+    RSI_PERIOD_15M: int = 14
+    MOMENTUM_WINDOW_15M: int = 4  # 4 velas × 15m = 60 min de momentum
+
+    # Compatibilidad (aliases al TF de entrada)
+    EMA_FAST: int = 8
     EMA_SLOW: int = 21
     RSI_PERIOD: int = 14
-    MOMENTUM_WINDOW: int = 10        # velas para calcular momentum
-    PRICE_HISTORY_LIMIT: int = 200   # velas en memoria por simbolo
-    CANDLE_INTERVAL: str = "1m"      # intervalo de velas
+    MOMENTUM_WINDOW: int = 6
+
+    PRICE_HISTORY_LIMIT: int = 200  # velas en memoria por simbolo y TF
+
+    # Multi-timeframe: bonificacion/penalizacion de confianza
+    MTF_AGREEMENT_BOOST: float = 0.15      # bonus cuando 5m y 15m coinciden
+    MTF_DISAGREEMENT_PENALTY: float = 0.30 # penalizacion cuando divergen
 
     # Deteccion de divergencia Binance→Polymarket
-    PRICE_MOVE_THRESHOLD: float = 0.005   # 0.5% movimiento minimo para signal
-    LEAD_LAG_WINDOW: int = 5              # minutos de ventana de lead/lag
+    PRICE_MOVE_THRESHOLD: float = 0.003   # 0.3% movimiento minimo (5m mueve menos)
+    LEAD_LAG_WINDOW: int = 3              # ventana de lead/lag en velas de 5m
 
     # Kelly fraction conservador
     KELLY_FRACTION: float = 0.25

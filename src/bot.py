@@ -1,23 +1,22 @@
 """
-Orquestador principal del trading bot.
+Orquestador principal del trading bot (multi-timeframe 5m/15m).
 
 Flujo:
-  1. Binance WebSocket → precios en tiempo real
-  2. Cada N segundos: analizar señales tecnicas
+  1. Binance WebSocket → velas 5m + 15m + ticker en tiempo real
+  2. Cada 60s: analisis MTF (15m tendencia + 5m entrada)
   3. Obtener mercados activos de Polymarket (cache 5 min)
-  4. Detectar oportunidades de hedge
-  5. Calcular tamaño proporcional
-  6. Ejecutar orden en Polymarket
+  4. Detectar oportunidades de hedge (precio Binance vs probabilidad Polymarket)
+  5. Calcular tamaño proporcional (Kelly conservador × confianza MTF)
+  6. Ejecutar orden en Polymarket antes de que corrija el mercado
   7. Monitorear posiciones abiertas
 """
 import asyncio
 import time
-from datetime import datetime
 from typing import Dict, List, Optional
 
 from config import cfg
 from src.analysis.hedge import HedgeDetector, HedgeOpportunity
-from src.analysis.predictor import TechnicalPredictor
+from src.analysis.predictor import MTFSignal, TechnicalPredictor
 from src.logger import setup_logger
 from src.polymarket.client import Market, PolymarketClient
 from src.portfolio import PortfolioManager
@@ -28,12 +27,18 @@ log = setup_logger("bot")
 
 class TradingBot:
     """
-    Bot de trading Binance → Polymarket hedge.
+    Bot de trading Binance → Polymarket hedge (multi-timeframe 5m/15m).
     """
 
     MARKET_REFRESH_INTERVAL = 300   # segundos entre actualizacion de mercados
-    ANALYSIS_INTERVAL = 30          # segundos entre ciclos de analisis
+    # Ciclo cada 60s: las velas de 5m cierran cada 300s, con 60s capturamos
+    # rapidamente cada nuevo cierre sin saturar la CPU
+    ANALYSIS_INTERVAL = 60
     BALANCE_REFRESH_INTERVAL = 60   # segundos entre actualizacion de balance
+    # Warmup minimo: necesitamos EMA_SLOW_5M (21) velas de 5m = 105 min reales.
+    # Empezamos el loop de analisis a los 2 min; el predictor descartara
+    # internamente hasta tener suficientes velas.
+    WARMUP_SECONDS = 120
 
     def __init__(self):
         self.feed = PriceFeed(cfg.TRACKED_SYMBOLS)
@@ -50,11 +55,13 @@ class TradingBot:
 
     async def start(self) -> None:
         log.info("=" * 60)
-        log.info("  AION CRYPTO TRADING BOT - INICIANDO")
-        log.info(f"  Simbolos: {cfg.TRACKED_SYMBOLS}")
-        log.info(f"  Max posicion: {cfg.MAX_POSITION_PCT*100:.0f}%")
-        log.info(f"  Edge minimo: {cfg.MIN_EDGE_THRESHOLD*100:.0f}%")
+        log.info("  AION CRYPTO TRADING BOT - INICIANDO (MTF 5m/15m)")
+        log.info(f"  Simbolos:         {cfg.TRACKED_SYMBOLS}")
+        log.info(f"  Timeframes:       {cfg.TF_ENTRY} (entrada) + {cfg.TF_TREND} (tendencia)")
+        log.info(f"  Max posicion:     {cfg.MAX_POSITION_PCT*100:.0f}%")
+        log.info(f"  Edge minimo:      {cfg.MIN_EDGE_THRESHOLD*100:.0f}%")
         log.info(f"  Confianza minima: {cfg.MIN_CONFIDENCE*100:.0f}%")
+        log.info(f"  Ciclo analisis:   {self.ANALYSIS_INTERVAL}s")
         log.info("=" * 60)
 
         # Inicializar Polymarket client
@@ -104,9 +111,8 @@ class TradingBot:
 
     async def _analysis_loop(self) -> None:
         """Loop principal de analisis y trading."""
-        # Esperar a que el feed tenga suficientes datos
-        log.info("Esperando datos del WebSocket (60s)...")
-        await asyncio.sleep(60)
+        log.info(f"Warmup inicial {self.WARMUP_SECONDS}s (acumulando velas 5m/15m)...")
+        await asyncio.sleep(self.WARMUP_SECONDS)
 
         while self._running:
             try:
@@ -133,7 +139,7 @@ class TradingBot:
 
     async def _run_analysis_cycle(self) -> None:
         """
-        Un ciclo completo: analizar → detectar → operar.
+        Un ciclo completo: analizar MTF → detectar hedge → operar.
         """
         now = time.time()
 
@@ -145,25 +151,31 @@ class TradingBot:
             log.warning("No hay mercados disponibles de Polymarket. Reintentando en el proximo ciclo.")
             return
 
-        log.debug(f"Ciclo de analisis | {len(self._markets)} mercados disponibles")
-
         all_opportunities: List[HedgeOpportunity] = []
 
         for symbol in cfg.TRACKED_SYMBOLS:
-            signal = self.predictor.analyze(symbol)
+            # Analisis multi-timeframe (5m entrada + 15m tendencia)
+            signal: Optional[MTFSignal] = self.predictor.analyze_mtf(symbol)
             if signal is None:
+                # Sin datos suficientes todavia — mostrar estado de acumulacion
+                counts = self.feed.candle_counts(symbol)
+                log.debug(
+                    f"[{symbol}] Acumulando velas | "
+                    f"5m={counts.get('5m', 0)}/{cfg.EMA_SLOW_5M+5} "
+                    f"15m={counts.get('15m', 0)}/{cfg.EMA_SLOW_15M+5}"
+                )
                 continue
 
-            price = self.feed.get_price(symbol)
-            if price:
-                log.info(
-                    f"[{symbol}] ${price:,.2f} | dir={signal.direction} "
-                    f"conf={signal.confidence:.2f} mom={signal.momentum:+.4f} "
-                    f"rsi={signal.rsi:.1f if signal.rsi else 'N/A'}"
-                )
+            log.info(signal.log_summary())
 
             if not signal.is_actionable():
-                log.debug(f"[{symbol}] Señal no accionable (conf={signal.confidence:.2f})")
+                reason = (
+                    "discrepancia TF" if not signal.tfs_agree and signal.signal_15m
+                    else f"conf={signal.confidence:.2f} < {cfg.MIN_CONFIDENCE}"
+                    if signal.confidence < cfg.MIN_CONFIDENCE
+                    else f"mom={signal.momentum:.4f} < {cfg.PRICE_MOVE_THRESHOLD}"
+                )
+                log.debug(f"[{symbol}] No accionable: {reason}")
                 continue
 
             opps = self.hedge_detector.find_opportunities(signal, self._markets)
